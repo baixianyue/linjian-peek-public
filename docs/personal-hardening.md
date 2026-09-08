@@ -18,6 +18,8 @@
 https://你的-mcp-域名/mcp/你的-LINJIAN_MCP_PATH_TOKEN
 ```
 
+Render 自动生成的值是标准 Base64，可能包含 `+`、`/` 和末尾的 `=`。请原样复制完整值；MCP 的私密路由会完整匹配这些字符。
+
 手机仍然连接 server 服务：
 
 ```text
@@ -52,4 +54,3 @@ ChatGPT 插件的正式用户认证方案是 OAuth 2.1，不能让 ChatGPT 携�
 3. 按双方商定范围逐项开启 Android 权限，不必一次全部开启。
 4. 先连接 MCP 私密地址，调用 `linjian_status`。
 5. 再分别测试读取状态、窗语、通知、闹钟、日历、打开 App 与按需截图。
-
