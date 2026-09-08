@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 
 const port = 18790;
-const accessToken = "abcdefghijklmnopqrstuvwxyz123456";
+// Match Render's generated standard Base64 format, including an embedded '/'
+// and trailing padding, so the private route cannot regress to URL-safe-only.
+const accessToken = "AbCdEfGhIjKlMnOpQrStUvWxYz0123+/abcd==";
 const base = `http://127.0.0.1:${port}`;
 const child = spawn(process.execPath, ["server.js"], {
   cwd: new URL(".", import.meta.url),
@@ -66,4 +68,3 @@ try {
 } finally {
   child.kill("SIGTERM");
 }
-
