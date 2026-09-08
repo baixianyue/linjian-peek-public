@@ -41,6 +41,20 @@ services:
     startCommand: npm start
     envVars:
       - fromGroup: zhangxinchuang-public-shared
+      # 单用户私密路径凭证：只写入 Render 环境变量，不要提交真实值到仓库。
+      # ChatGPT 连接地址使用 https://<mcp-domain>/mcp/<此值>。
+      - key: LINJIAN_MCP_PATH_TOKEN
+        generateValue: true
+      # 默认只暴露第一阶段商定的观察、时间痕迹和轻量行动工具。
+      - key: LINJIAN_TOOL_ALLOWLIST
+        value: linjian_status,peek_screen,latest_screen,get_window_whisper,set_window_whisper,get_companion_actions,get_activity_events,add_activity_event,get_phone_state,get_life_state,get_guardian_calendar,add_guardian_calendar_event,list_guardian_days,add_guardian_day,update_guardian_day,get_weather_state,list_known_apps,open_app,send_notification,set_alarm,record_visit,get_last_visit,get_visit_history,get_visit_stats
+      # 即使将来误暴露通用命令工具，手机动作仍会在这里二次拦截。
+      - key: LINJIAN_COMMAND_ALLOWLIST
+        value: peek,open_app,send_notification,set_alarm,get_calendar_state,upsert_calendar_event
+      - key: LINJIAN_ENABLE_WALLET_MCP
+        value: "false"
+      - key: LINJIAN_ENABLE_LEGACY_SSE
+        value: "false"
       # 自动取 server 的公网 HTTPS 地址，例如 https://zhangxinchuang-server-xxxx.onrender.com
       # 不再取 property: hostport，避免部分环境下 MCP 访问 Render 内网地址 fetch failed。
       - key: LINJIAN_URL
