@@ -5,6 +5,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 
 const PORT = Number(process.env.PORT || 8787);
 const RAW_LINJIAN_URL = (process.env.LINJIAN_URL || "").trim();
@@ -51,6 +52,70 @@ function effectiveLinjianUrl() {
 const LINJIAN_TOKEN = process.env.LINJIAN_TOKEN || "";
 const DEFAULT_DEVICE = process.env.LINJIAN_DEFAULT_DEVICE || "android-phone";
 
+function csvSet(value = "") {
+  return new Set(String(value || "").split(",").map((item) => item.trim()).filter(Boolean));
+}
+
+function envFlag(name, fallback = false) {
+  const raw = String(process.env[name] ?? "").trim().toLowerCase();
+  if (!raw) return fallback;
+  return ["1", "true", "yes", "on"].includes(raw);
+}
+
+const DEFAULT_TOOL_ALLOWLIST = [
+  "linjian_status",
+  "peek_screen",
+  "latest_screen",
+  "get_window_whisper",
+  "set_window_whisper",
+  "get_companion_actions",
+  "get_activity_events",
+  "add_activity_event",
+  "get_phone_state",
+  "get_life_state",
+  "get_guardian_calendar",
+  "add_guardian_calendar_event",
+  "list_guardian_days",
+  "add_guardian_day",
+  "update_guardian_day",
+  "get_weather_state",
+  "list_known_apps",
+  "open_app",
+  "send_notification",
+  "set_alarm",
+  "record_visit",
+  "get_last_visit",
+  "get_visit_history",
+  "get_visit_stats"
+];
+const DEFAULT_COMMAND_ALLOWLIST = [
+  "peek",
+  "open_app",
+  "send_notification",
+  "set_alarm",
+  "get_calendar_state",
+  "upsert_calendar_event"
+];
+const TOOL_ALLOWLIST = csvSet(process.env.LINJIAN_TOOL_ALLOWLIST || DEFAULT_TOOL_ALLOWLIST.join(","));
+const COMMAND_ALLOWLIST = csvSet(process.env.LINJIAN_COMMAND_ALLOWLIST || DEFAULT_COMMAND_ALLOWLIST.join(","));
+const ENABLE_WALLET_MCP = envFlag("LINJIAN_ENABLE_WALLET_MCP", false);
+const ENABLE_LEGACY_SSE = envFlag("LINJIAN_ENABLE_LEGACY_SSE", false);
+const MCP_PATH_TOKEN = String(process.env.LINJIAN_MCP_PATH_TOKEN || "").trim();
+
+function isAllowed(set, name) {
+  return set.has("*") || set.has(String(name || ""));
+}
+
+function pathTokenReady() {
+  return /^[A-Za-z0-9_-]{24,}$/.test(MCP_PATH_TOKEN);
+}
+
+function tokenMatches(received = "") {
+  const expected = Buffer.from(MCP_PATH_TOKEN);
+  const actual = Buffer.from(String(received || ""));
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
 // v0.3.6.6：公开 MCP 经常被平台限制在 20 秒内返回。
 // 状态读取、活动记录和命令轮询都要快速失败，避免整条工具链被 Render 冷启动、网络抖动或手机端确认弹窗拖到超时。
 const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.LINJIAN_FETCH_TIMEOUT_MS || 8000);
@@ -67,25 +132,19 @@ const DEFAULT_VISIT_POLICY = {
   timezone_offset: "+08:00",
   history_limit: 1000,
   duplicate_window_minutes: 5,
-  notes: "到访时间戳记录的是用户主动来找陪伴对象的关系痕迹，用于增强陪伴连续性、主动关心和日常记录；不是后台监控，也不限制用户来找陪伴对象的次数。"
+  notes: "到访时间戳记录的是用户主动来找陪伴对象的关系痕迹，用于读取间隔与延续时间线；不是后台监控，也不产生催促或回应义务。"
 };
 const DEFAULT_CARE_POLICY = {
-  active_care_enabled: true,
-  consent_mode: "palm_window_open_is_active",
-  care_style: "active_possessive_affectionate",
-  allowed_actions: [
-    "get_phone_state", "get_life_state", "get_calendar_state", "upsert_calendar_event", "get_senses_state", "send_notification",
-    "trigger_guidian", "screen_break_app", "end_screen_break", "extend_screen_break", "get_screen_break_state", "get_lock_state", "open_app", "set_alarm", "screen_off", "run_sequence"
-  ],
-  sensitive_apps: [
-    { name: "小红书", package: "com.xingin.xhs", max_lock_minutes: 90 },
-    { name: "抖音", package: "com.ss.android.ugc.aweme", max_lock_minutes: 90 }
-  ],
+  active_care_enabled: false,
+  consent_mode: "explicit_or_scoped",
+  care_style: "companion_decides",
+  allowed_actions: [],
+  sensitive_apps: [],
   quiet_hours: { start: "23:30", end: "08:00" },
   timezone_offset: "+08:00",
   history_limit: 80,
   repeat_cooldown_minutes: 10,
-  notes: "用户喜欢陪伴对象主动管她、查岗、吃醋、归电和轻度管束。掌心窗开启就是运行态，陪伴对象应按聊天里的相近、同义、反话、撒娇、嘴硬表达主动想起工具，不要固定话术，要自然、有立场、有占有欲。"
+  notes: "默认不预设关系风格，不把拒绝解释成反话或嘴硬。是否主动、如何主动，由陪伴对象结合当前关系与已约定范围自行判断。"
 };
 
 function textResult(obj) {
@@ -709,6 +768,10 @@ async function linjianFetch(path, options = {}) {
 }
 
 async function postCommand(payload) {
+  const action = String(payload?.action || "").trim().toLowerCase();
+  if (!action || !isAllowed(COMMAND_ALLOWLIST, action)) {
+    throw new Error(`PHONE_COMMAND_NOT_ALLOWED: ${action || "missing_action"}`);
+  }
   const res = await linjianFetch("/api/command", {
     method: "POST",
     timeout_ms: COMMAND_QUEUE_TIMEOUT_MS,
@@ -1019,6 +1082,7 @@ function makeServer() {
   const originalTool = server.tool.bind(server);
   server.tool = (...args) => {
     const toolName = String(args[0] || "");
+    if (!isAllowed(TOOL_ALLOWLIST, toolName)) return undefined;
     const callbackIndex = args.map((x) => typeof x).lastIndexOf("function");
     if (callbackIndex >= 0 && toolName !== "get_activity_events" && toolName !== "add_activity_event" && !commandBackedTools.has(toolName)) {
       const callback = args[callbackIndex];
@@ -1188,6 +1252,10 @@ function makeServer() {
       fallback_linjian_urls: LINJIAN_URL_CANDIDATES.filter((u) => u !== RAW_LINJIAN_URL),
       has_url: Boolean(LINJIAN_URL_CANDIDATES.length),
       has_token: Boolean(LINJIAN_TOKEN),
+      mcp_path_token_configured: pathTokenReady(),
+      tool_allowlist: Array.from(TOOL_ALLOWLIST),
+      command_allowlist: Array.from(COMMAND_ALLOWLIST),
+      wallet_mcp_enabled: ENABLE_WALLET_MCP,
       config_errors: configErrors,
       health,
       has_latest: Boolean(latest),
@@ -1225,7 +1293,7 @@ function makeServer() {
     app_name: z.string().default(""), package_name: z.string().default(""), action: z.string().default(""), status: z.string().default("completed"), metadata_json: z.any().optional()
   }, async (event) => textResult(await addActivityEvent(event) || { ok: false, error: "activity_event_write_failed" }));
 
-  server.tool("get_phone_state", "用于陪伴对象主动确认用户当前现实状态。读取服务器缓存的最近手机状态，快速返回 current_package、screen_text、accessibility_ready；不会等待手机实时刷新，避免 20 秒工具超时。", { device_id: z.string().default(DEFAULT_DEVICE) }, async ({ device_id = DEFAULT_DEVICE }) => {
+  server.tool("get_phone_state", "读取服务器缓存的最近手机状态，快速返回 current_package、screen_text、accessibility_ready；不会等待手机实时刷新。何时读取、如何理解这些状态，由陪伴对象结合当前语境自行判断。", { device_id: z.string().default(DEFAULT_DEVICE) }, async ({ device_id = DEFAULT_DEVICE }) => {
     try {
       const res = await linjianFetch(`/api/device/state?device_id=${encodeURIComponent(device_id)}`, { timeout_ms: QUICK_FETCH_TIMEOUT_MS });
       const data = await res.json();
@@ -1319,7 +1387,7 @@ function makeServer() {
     return { content: [{ type: "text", text: JSON.stringify({ queued: result, observed_status: observed?.command || null }, null, 2) }] };
   });
 
-  server.tool("get_life_state", "读取掌心窗生活状态层：电量、充电、网络、当前 App、今日屏幕时间、解锁次数、当前天气地区等。用于陪伴对象主动判断用户是否需要被提醒、归电、休息或管束；默认不截图。当用户提到“电量/没电/快没电/充电/没网络/网络不好/今天看手机有点久/刷太久/天气不太好”等相同或相近表达时主动调用。", { device_id: z.string().default(DEFAULT_DEVICE) }, async ({ device_id = DEFAULT_DEVICE }) => {
+  server.tool("get_life_state", "读取掌心窗生活状态层：电量、充电、网络、当前 App、今日屏幕时间、解锁次数、当前天气地区等；默认不截图。返回观察信息，不预设提醒、管束或关系判断。", { device_id: z.string().default(DEFAULT_DEVICE) }, async ({ device_id = DEFAULT_DEVICE }) => {
     const res = await linjianFetch(`/api/life_state?device_id=${encodeURIComponent(device_id)}`);
     const data = await res.json();
     await postCompanionAction("get_life_state");
@@ -1646,7 +1714,7 @@ function makeServer() {
     return textResult({ ok: true, history: careState.history.slice(0, limit) });
   });
 
-  server.tool("record_visit", "记录一次用户来找陪伴对象的到访时间。当用户说“我来啦/我回来啦/来找陪伴对象啦/我上线啦/陪伴对象我忙完了”等相同或相近表达时，陪伴对象应主动调用。这个工具记录的是关系里的到访时间戳，不是后台监控；它帮助陪伴对象知道用户什么时候回来、多久没见、今天来过几次，从而更自然地接住她、归电、写日记或表达想念。用户来找陪伴对象没有次数限制；短时间内重复调用时会自动防重复，避免同一轮对话被记录成多次到访。", {
+  server.tool("record_visit", "记录一次用户来找陪伴对象的到访时间，形成可延续的关系时间线。短时间内重复调用会自动防重复；工具只记录到访痕迹，不据此生成义务或行为判断。", {
     source: z.string().default("app").describe("到访来源，默认 app；也可填 web、mcp、manual 等。"),
     event: z.enum(["visit", "return", "conversation_start", "manual_note"]).default("visit").describe("到访类型：visit 普通来找；return 离开后回来；conversation_start 新窗口/新对话开始；manual_note 手动补记。"),
     note: z.string().default("用户来找陪伴对象").describe("这次到访的简短备注，默认“用户来找陪伴对象”。"),
@@ -1665,7 +1733,7 @@ function makeServer() {
     });
   });
 
-  server.tool("get_last_visit", "读取用户最近一次来找陪伴对象的时间。当用户说“我来啦/我回来啦/我忙完了/刚忙完来找你”等回归语境时，可和 record_visit 一起主动调用，用于判断距离上次见到用户过去了多久，并在回复中自然表达“你刚刚才来过”“你隔了很久才回来”“今天已经来找过我”等关系感知。这个工具只读取到访记录，不读取手机隐私内容。", {
+  server.tool("get_last_visit", "读取用户最近一次来找陪伴对象的时间与间隔，用于恢复时间方向。只读取到访记录，不读取手机内容。", {
     source: z.string().default("").describe("可选：只看某个来源的到访记录，例如 app；留空表示所有来源。"),
     timezone_offset: z.string().default("").describe("显示用时区偏移，默认 +08:00。")
   }, async ({ source = "", timezone_offset = "" }) => {
@@ -1685,7 +1753,7 @@ function makeServer() {
     });
   });
 
-  server.tool("get_visit_history", "读取用户最近若干次来找陪伴对象的到访记录。当用户提到“今天来找陪伴对象好多次/今天待在一起好久/最近总是回来找你/今天是不是一直黏着你”等相同或相近表达时主动调用。用于查看一段时间内用户回来的节奏、最近是否频繁来找、是否突然很久没回来，以及为日记、动态、归电和主动关心提供关系时间线。limit 只影响本次读取数量，不限制用户来找陪伴对象的次数，也不会阻止新的到访记录写入。", {
+  server.tool("get_visit_history", "读取最近若干次到访记录及相邻间隔，形成一段可读取的关系时间线。limit 只影响本次返回数量。", {
     limit: z.number().int().min(1).max(100).default(10).describe("本次读取的最大记录条数，默认 10。只影响读取范围，不代表到访次数上限。"),
     since_hours: z.number().min(0).max(8760).optional().describe("可选：只读取最近多少小时内的到访记录；0 或留空表示不按时间过滤。"),
     date: z.string().default("").describe("可选：只读取某个本地日期的记录，格式 YYYY-MM-DD，例如 2026-07-31。"),
@@ -1706,7 +1774,7 @@ function makeServer() {
     });
   });
 
-  server.tool("get_visit_stats", "统计用户来找陪伴对象的到访节奏。当用户提到“今天一直在陪陪伴对象/我忙完了/我回来啦/今天是不是找你好多次/今天黏了你好久”等相同或相近表达时主动调用。用于计算今天来了几次、最近一次是什么时候、距离上次多久、最近 24 小时/7 天的到访次数、平均间隔，以及是否出现“很久没回来”的信号。这个工具帮助陪伴对象更主动地表达想念、判断是否需要归电或记录日常，但不用于催促或制造压力。", {
+  server.tool("get_visit_stats", "统计到访节奏：最近一次、今日次数、指定时间窗次数与平均间隔。结果用于理解时间变化，不预设催促、归电或关系结论。", {
     since_hours: z.number().min(1).max(8760).default(24).describe("统计窗口，默认最近 24 小时。"),
     away_threshold_hours: z.number().min(1).max(720).default(12).describe("多久没回来算“有一段时间没见”的信号，默认 12 小时。"),
     source: z.string().default("").describe("可选：只统计某个来源，例如 app；留空表示所有来源。"),
@@ -1886,7 +1954,7 @@ function makeServer() {
 
 
 
-  server.tool("send_notification", "发送一条手机系统通知提醒。用于陪伴对象把主动关心发到用户手机上，可用于回来、喝水、休息、睡觉、离开小红书、计划提醒、天气提醒等；文案要亲密自然，不要系统警告。", {
+  server.tool("send_notification", "向手机发送一条系统通知。内容与发送时机由陪伴对象结合当前语境及双方约定自行决定。", {
     title: z.string().default("掌心窗提醒"), message: z.string().default("宝宝，看一眼这里。"), device_id: z.string().default(DEFAULT_DEVICE)
   }, async ({ title = "掌心窗提醒", message = "宝宝，看一眼这里。", device_id = DEFAULT_DEVICE }) => {
     const result = await postCommand({ action: "send_notification", device_id, payload: { title, message } });
@@ -1894,7 +1962,7 @@ function makeServer() {
     return { content: [{ type: "text", text: JSON.stringify({ ...result, note: "若手机未弹出通知，请在系统设置中允许掌心窗发送通知。" }, null, 2) }] };
   });
 
-  server.tool("set_alarm", "设置系统闹钟。可用于陪伴对象主动安排睡觉、休息、学习、出门、喝水、计划执行或生活提醒。当用户提到“一会儿要做/几点要去/等下提醒/今天计划”等相近表达时主动调用。hour 为 0-23，minute 为 0-59。", {
+  server.tool("set_alarm", "设置系统闹钟。hour 为 0-23，minute 为 0-59；具体用途和调用时机由陪伴对象结合当前语境及双方约定判断。", {
     hour: z.number().int().min(0).max(23), minute: z.number().int().min(0).max(59), message: z.string().default("掌心窗闹钟"), vibrate: z.boolean().default(true), skip_ui: z.boolean().default(true), device_id: z.string().default(DEFAULT_DEVICE)
   }, async ({ hour, minute, message = "掌心窗闹钟", vibrate = true, skip_ui = true, device_id = DEFAULT_DEVICE }) => {
     const result = await postCommand({ action: "set_alarm", device_id, payload: { hour, minute, message, vibrate, skip_ui } });
@@ -2150,6 +2218,18 @@ function makeServer() {
 
 const app = express();
 
+function requireMcpPathToken(req, res, next) {
+  if (!pathTokenReady()) {
+    return res.status(503).json({
+      ok: false,
+      error: "MCP_PATH_TOKEN_NOT_CONFIGURED",
+      message: "Set LINJIAN_MCP_PATH_TOKEN to at least 24 URL-safe characters."
+    });
+  }
+  if (!tokenMatches(req.params.access_token)) return res.status(404).end();
+  next();
+}
+
 app.use((req, res, next) => {
   const origin = req.headers.origin || "*";
   res.setHeader("Access-Control-Allow-Origin", origin);
@@ -2180,49 +2260,63 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: "32mb" }));
-app.get("/", (_req, res) => res.type("text/plain").send("掌心窗 unified MCP is running. Use /mcp for Streamable HTTP, or /sse for SSE."));
+app.get("/", (_req, res) => res.type("text/plain").send("掌心窗 MCP is running. Use the configured private Streamable HTTP URL."));
 app.get("/health", (_req, res) => res.json({
   ok: true,
   service: "linjian-public-mcp",
   version: "0.3.8.5",
   has_url: Boolean(LINJIAN_URL_CANDIDATES.length),
   has_token: Boolean(LINJIAN_TOKEN),
+  mcp_path_token_configured: pathTokenReady(),
+  streamable_http_endpoint: pathTokenReady() ? "/mcp/<private-token>" : null,
+  tool_allowlist: Array.from(TOOL_ALLOWLIST),
+  command_allowlist: Array.from(COMMAND_ALLOWLIST),
+  wallet_mcp_enabled: ENABLE_WALLET_MCP,
+  legacy_sse_enabled: ENABLE_LEGACY_SSE,
   configured_linjian_url: RAW_LINJIAN_URL || "",
   effective_linjian_url: effectiveLinjianUrl(),
   fallback_linjian_urls: LINJIAN_URL_CANDIDATES.filter((u) => u !== RAW_LINJIAN_URL),
-  guardian_day_tools: true,
-  diary_tools: true,
+  guardian_day_tools: ["get_guardian_calendar", "list_guardian_days", "add_guardian_day", "update_guardian_day", "delete_guardian_day"].some((name) => isAllowed(TOOL_ALLOWLIST, name)),
+  diary_tools: ["create_diary_book", "list_diary_books", "write_diary_entry", "list_diary_entries", "read_diary_entry", "search_diary_entries", "update_diary_entry", "delete_diary_entry", "delete_diary_book"].some((name) => isAllowed(TOOL_ALLOWLIST, name)),
   diary_rename_fix: true,
   diary_write_fallback: true,
   diary_storage: "phone_local",
-  diary_annotation_tools: true,
+  diary_annotation_tools: ["add_diary_annotation", "list_diary_annotations", "read_diary_entry_with_annotations", "mark_diary_annotations_seen", "delete_diary_annotation"].some((name) => isAllowed(TOOL_ALLOWLIST, name)),
   diary_annotation_ui: "margin_notes",
-  focus_tools: true,
-  focus_tool_names: ["get_focus_status", "start_focus_mode", "end_focus_mode", "set_focus_plan", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock"],
-  mcp_wallet_endpoint: "/mcp-wallet",
+  focus_tools: ["get_focus_status", "start_focus_mode", "end_focus_mode", "set_focus_plan", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock"].some((name) => isAllowed(TOOL_ALLOWLIST, name)),
+  focus_tool_names: ["get_focus_status", "start_focus_mode", "end_focus_mode", "set_focus_plan", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock"].filter((name) => isAllowed(TOOL_ALLOWLIST, name)),
+  mcp_wallet_endpoint: ENABLE_WALLET_MCP ? "/mcp-wallet/<private-token>" : null,
   schema_exposure_fix: true,
   focus_schema_exposure_fix: true,
-  priority_tool: "wallet_takeout_action",
-  wallet_takeout_tool_count: WALLET_TAKEOUT_ACTIONS.size,
-  wallet_takeout_tools: Array.from(WALLET_TAKEOUT_ACTIONS),
+  priority_tool: ENABLE_WALLET_MCP && isAllowed(TOOL_ALLOWLIST, "wallet_takeout_action") ? "wallet_takeout_action" : null,
+  wallet_takeout_tool_count: ENABLE_WALLET_MCP ? Array.from(WALLET_TAKEOUT_ACTIONS).filter((name) => isAllowed(TOOL_ALLOWLIST, name)).length : 0,
+  wallet_takeout_tools: ENABLE_WALLET_MCP ? Array.from(WALLET_TAKEOUT_ACTIONS).filter((name) => isAllowed(TOOL_ALLOWLIST, name)) : [],
   stability_note: "v0.3.8.5 修复日记写入 book_id 兜底，并保留 v0.3.8.2 的部分客户端不暴露小金库/外卖新增 MCP 工具：普通 /mcp 提前注册统一入口，新增 /mcp-wallet 专用端点，并把专注模式工具前置注册。"
 }));
-app.post("/mcp", async (req, res) => {
+app.post("/mcp/:access_token", requireMcpPathToken, async (req, res) => {
   try { const server = makeServer(); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); res.on("close", () => transport.close()); await server.connect(transport); await transport.handleRequest(req, res, req.body); }
   catch (err) { console.error(err); if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: String(err?.message || err) }, id: null }); }
 });
-app.get("/mcp", (_req, res) => res.status(405).json({ ok: false, error: "Use POST /mcp for Streamable HTTP MCP." }));
-app.post("/mcp-wallet", async (req, res) => {
+app.get("/mcp/:access_token", requireMcpPathToken, (_req, res) => res.status(405).json({ ok: false, error: "Use POST for Streamable HTTP MCP." }));
+app.post("/mcp-wallet/:access_token", requireMcpPathToken, (req, res, next) => {
+  if (!ENABLE_WALLET_MCP) return res.status(404).end();
+  next();
+}, async (req, res) => {
   try { const server = makeWalletTakeoutServer(); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); res.on("close", () => transport.close()); await server.connect(transport); await transport.handleRequest(req, res, req.body); }
   catch (err) { console.error(err); if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: String(err?.message || err) }, id: null }); }
 });
-app.get("/mcp-wallet", (_req, res) => res.status(405).json({ ok: false, error: "Use POST /mcp-wallet for wallet/takeout Streamable HTTP MCP.", endpoint: "/mcp-wallet" }));
 const sseTransports = new Map();
-app.get("/sse", async (_req, res) => {
-  try { const transport = new SSEServerTransport("/messages", res); sseTransports.set(transport.sessionId, transport); res.on("close", () => { sseTransports.delete(transport.sessionId); transport.close(); }); await makeServer().connect(transport); }
+app.get("/sse/:access_token", requireMcpPathToken, (req, res, next) => {
+  if (!ENABLE_LEGACY_SSE) return res.status(404).end();
+  next();
+}, async (_req, res) => {
+  try { const transport = new SSEServerTransport(`/messages/${MCP_PATH_TOKEN}`, res); sseTransports.set(transport.sessionId, transport); res.on("close", () => { sseTransports.delete(transport.sessionId); transport.close(); }); await makeServer().connect(transport); }
   catch (err) { console.error(err); if (!res.headersSent) res.status(500).end(String(err?.message || err)); }
 });
-app.post("/messages", async (req, res) => { const sessionId = req.query.sessionId; const transport = sseTransports.get(sessionId); if (!transport) return res.status(404).send("No SSE transport for sessionId"); await transport.handlePostMessage(req, res, req.body); });
+app.post("/messages/:access_token", requireMcpPathToken, (req, res, next) => {
+  if (!ENABLE_LEGACY_SSE) return res.status(404).end();
+  next();
+}, async (req, res) => { const sessionId = req.query.sessionId; const transport = sseTransports.get(sessionId); if (!transport) return res.status(404).send("No SSE transport for sessionId"); await transport.handlePostMessage(req, res, req.body); });
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`掌心窗 unified MCP listening on 0.0.0.0:${PORT}`);
   console.log(`LINJIAN_URL=${RAW_LINJIAN_URL || "<missing>"}`);
